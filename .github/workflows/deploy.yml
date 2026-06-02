@@ -46,13 +46,12 @@ jobs:
             
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             
+            sed -i '/^DOCKER_IMAGE_NAME=/d' .env || true
+            echo "DOCKER_IMAGE_NAME=${{ secrets.DOCKERHUB_USERNAME }}/django-site:latest" >> .env
+            
             docker compose pull web
             
             export DOCKER_IMAGE_NAME=${{ secrets.DOCKERHUB_USERNAME }}/django-site:latest
             docker compose up -d --remove-orphans
             
-            docker compose exec -T web poetry run python manage.py migrate --noinput
-            docker compose exec -T web poetry run python manage.py collectstatic --noinput
-            
-            docker compose exec -T nginx nginx -s reload
             docker logout
