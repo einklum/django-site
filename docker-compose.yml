@@ -1,0 +1,110 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: django_db
+    restart: always
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: django_redis
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 3
+
+  web:
+    image: ${DOCKER_WEB_IMAGE}
+    container_name: django_web
+    restart: always
+    env_file: .env
+    command: >
+      sh -c "poetry run python manage.py migrate --noinput && 
+             poetry run python manage.py collectstatic --noinput && 
+             poetry run python manage.py loaddata ./fixtures/goods/* && 
+             poetry run gunicorn app.wsgi:application --bind 0.0.0.0:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    image: ${DOCKER_NGINX_IMAGE}
+    container_name: nginx_server
+    restart: always
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+      - NGINX_ENVSUBST_FILTER=${NGINX_ENVSUBST_FILTER}
+    volumes:
+      - static_volume:/app/staticfiles:ro
+      - media_volume:/app/media:ro
+      - certbot_etc:/etc/letsencrypt
+      - certbot_var:/var/lib/letsencrypt:ro
+      - certbot_challenge:/var/www/certbot:ro
+    depends_on:
+      - web
+
+  certbot:
+    image: certbot/certbot
+    container_name: certbot_client
+    volumes:
+      - certbot_etc:/etc/letsencrypt
+      - certbot_var:/var/lib/letsencrypt
+      - certbot_challenge:/var/www/certbot
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: >
+      /bin/sh -c "
+      echo 'установка docker клиента для автоматизации' &&
+      apk add --no-cache docker-cli &&
+
+      echo 'ожидание запуска nginx' &&
+      sleep 5 &&
+
+      if [ ! -f /etc/letsencrypt/live/${DOMAIN}/cert.pem ] || openssl x509 -in /etc/letsencrypt/live/${DOMAIN}/cert.pem -text -noout | grep -q 'Issuer:.*localhost'; then
+        echo 'настоящий ssl не найден или обнаружена заглушка, запрашиваем сертификат...' &&
+        rm -rf /etc/letsencrypt/live/${DOMAIN} &&
+        rm -rf /etc/letsencrypt/archive/${DOMAIN} &&
+        rm -rf /etc/letsencrypt/renewal/${DOMAIN}.conf &&
+
+        certbot certonly --webroot -w /var/www/certbot --staging --non-interactive --register-unsafely-without-email --agree-tos --no-eff-email -d ${DOMAIN} --keep-until-expiring &&
+
+        echo 'перезагружаем конфиг nginx чтобы применить новые сертификаты' &&
+        docker exec nginx_server nginx -s reload;
+      else
+        echo 'на сервере обнаружен настоящий боевой ssl-сертификат lets encrypt, пропускаем генерацию'
+      fi;
+
+      while :; do
+        echo 'проверка обновления сертификатов каждые 12 часов' &&
+        certbot renew --deploy-hook 'docker exec nginx_server nginx -s reload';
+        sleep 12h & wait $$!;
+      done"
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+  certbot_etc:
+  certbot_var:
+  certbot_challenge:
+
